@@ -2,6 +2,15 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import ProtectedRoute from '@/components/ProtectedRoute';
 import api from '@/lib/axios';
 import Link from 'next/link';
+import { Select, Tag } from 'antd';
+import type { CustomTagProps } from 'rc-select/lib/BaseSelect';
+
+type Product = {
+  ProductID: number;
+  ProductName: string;
+  Description: string;
+  ProductImage: string | null;
+};
 
 type ApiCoupon = {
   Id: number;
@@ -36,6 +45,9 @@ export default function CouponsPage() {
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  const [products, setProducts] = useState<Product[]>([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+
   const [form, setForm] = useState({
     Code: '',
     Description: '',
@@ -50,8 +62,25 @@ export default function CouponsPage() {
     StartDate: '',
     EndDate: '',
     IsActive: true,
-    ApplicableProductIds: ''
+    ApplicableProductIds: [] as number[]
   });
+
+  // Fetch products on component mount
+  useEffect(() => {
+    const fetchProducts = async () => {
+      try {
+        setLoadingProducts(true);
+        const res = await api.get<Product[]>('/api/products');
+        setProducts(res.data);
+      } catch (error) {
+        console.error('Failed to fetch products', error);
+      } finally {
+        setLoadingProducts(false);
+      }
+    };
+
+    fetchProducts();
+  }, []);
 
   const resetForm = () => {
     setForm({
@@ -68,7 +97,7 @@ export default function CouponsPage() {
       StartDate: '',
       EndDate: '',
       IsActive: true,
-      ApplicableProductIds: ''
+      ApplicableProductIds: []
     });
     setFormError(null);
     setEditing(null);
@@ -95,7 +124,7 @@ export default function CouponsPage() {
       StartDate: c.StartDate ? String(c.StartDate).slice(0, 10) : '',
       EndDate: c.EndDate ? String(c.EndDate).slice(0, 10) : '',
       IsActive: !!c.IsActive,
-      ApplicableProductIds: Array.isArray(c.ApplicableProductIds) ? c.ApplicableProductIds.join(', ') : ''
+      ApplicableProductIds: Array.isArray(c.ApplicableProductIds) ? c.ApplicableProductIds : []
     });
     setFormError(null);
     setModalOpen(true);
@@ -114,11 +143,15 @@ export default function CouponsPage() {
     try {
       setLoading(true);
       setError(null);
-      const res = await api.get<ApiCoupon[]>('/api/coupons/active');
-      setCoupons(Array.isArray(res.data) ? res.data : []);
+      const resActive = await api.get<ApiCoupon[]>('/api/coupons/active');
+      const data = Array.isArray(resActive.data) ? resActive.data : [];
+      setCoupons(data);
+      return data;
     } catch (e) {
+      console.error('Error fetching coupons:', e);
       setError('Failed to load coupons');
       setCoupons([]);
+      return [];
     } finally {
       setLoading(false);
     }
@@ -422,8 +455,19 @@ export default function CouponsPage() {
                 onSubmit={async (e) => {
                   e.preventDefault();
                   setFormError(null);
-                  if (!form.Code.trim()) { setFormError('Code is required'); return; }
+                  const code = form.Code.trim().toUpperCase();
+                  if (!code) { setFormError('Code is required'); return; }
+                  if (coupons.some(c => c.Code?.toUpperCase() === code && c.Id !== (editing?.Id ?? -1))) {
+                    setFormError('Code already exists');
+                    return;
+                  }
                   if (form.DiscountAmount === '' || isNaN(Number(form.DiscountAmount))) { setFormError('Discount amount is required'); return; }
+                  if (form.MaxDiscountAmount === '' || isNaN(Number(form.MaxDiscountAmount))) { setFormError('Max discount amount is required'); return; }
+                  if (form.MaxUsageCount === '' || isNaN(Number(form.MaxUsageCount))) { setFormError('Max usage count is required'); return; }
+                  if (form.MaxUsagePerUser === '' || isNaN(Number(form.MaxUsagePerUser))) { setFormError('Max usage per user is required'); return; }
+                  if (form.MinimumOrderValue === '' || isNaN(Number(form.MinimumOrderValue))) { setFormError('Minimum order value is required'); return; }
+                  if (!form.StartDate) { setFormError('Start date is required'); return; }
+                  if (!form.ApplicableProductIds || form.ApplicableProductIds.length === 0) { setFormError('At least one product must be selected'); return; }
                   const disc = Math.max(0, Number(form.DiscountAmount));
                   if (form.IsPercentage && (disc < 0 || disc > 100)) { setFormError('Percentage discount must be between 0 and 100'); return; }
                   const mov = Math.max(0, Number(form.MinimumOrderValue || 0));
@@ -434,7 +478,7 @@ export default function CouponsPage() {
                     setSubmitting(true);
                     const payload = {
                       Id: 0,
-                      Code: form.Code.trim(),
+                      Code: code,
                       Description: form.Description?.trim() || '',
                       DiscountAmount: form.IsPercentage ? Math.min(100, disc) : disc,
                       MinimumOrderValue: mov,
@@ -444,25 +488,49 @@ export default function CouponsPage() {
                       MaxUsagePerUser: maxPerUser,
                       IsFirstOrderOnly: !!form.IsFirstOrderOnly,
                       IsNewUserOnly: !!form.IsNewUserOnly,
-                      StartDate: form.StartDate || null,
-                      EndDate: form.EndDate || null,
+                      StartDate: form.StartDate,
+                      EndDate: form.EndDate || undefined,
                       IsActive: !!form.IsActive,
-                      ApplicableProductIds: (form.ApplicableProductIds || '')
-                        .split(',')
-                        .map(s => s.trim())
-                        .filter(Boolean)
-                        .map(Number)
+                      ApplicableProductIds: form.ApplicableProductIds || []
                     };
                     if (editing) {
-                      payload.Id = editing.Id;
                       await api.put(`/api/coupons/${editing.Id}`, payload);
                     } else {
-                      await api.post('/api/coupons', payload);
+                      const createdRes = await api.post<ApiCoupon>('/api/coupons', payload);
+                      const created = createdRes.data;
+
+                      setCoupons((prev) => {
+                        const next = [created, ...prev.filter((c) => c.Id !== created.Id)];
+                        return next;
+                      });
+
+                      const refreshed = await fetchCoupons();
+                      setCoupons([created, ...refreshed.filter((c) => c.Id !== created.Id)]);
+                      setModalOpen(false);
+                      resetForm();
+                      return;
                     }
                     setModalOpen(false);
                     resetForm();
                     await fetchCoupons();
                   } catch (err: any) {
+                    const serverData = err?.response?.data;
+                    const serverText = typeof serverData === 'string' ? serverData : '';
+                    const serverMessage =
+                      typeof serverData === 'string'
+                        ? null
+                        : (serverData?.message || serverData?.title || serverData?.error || null);
+
+                    if (serverText.toLowerCase().includes('coupon code must be unique')) {
+                      setFormError('Code already exists');
+                      return;
+                    }
+
+                    if (serverMessage) {
+                      setFormError(String(serverMessage));
+                      return;
+                    }
+
                     setFormError(editing ? 'Failed to update coupon' : 'Failed to create coupon');
                   } finally {
                     setSubmitting(false);
@@ -470,21 +538,41 @@ export default function CouponsPage() {
                 }}
                 className="space-y-4 overflow-y-auto px-4 py-4 md:p-0 flex-1"
               >
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-3">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Code</label>
-                    <input value={form.Code} onChange={(e) => setForm(v => ({ ...v, Code: e.target.value }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Code <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      required
+                      value={form.Code} 
+                      onChange={(e) => {
+                        const sanitized = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+                        setForm(v => ({ ...v, Code: sanitized }));
+                      }} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 uppercase" 
+                      pattern="[A-Z0-9]+"
+                      title="Only uppercase letters and numbers are allowed"
+                    />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                    <input value={form.Description} onChange={(e) => setForm(v => ({ ...v, Description: e.target.value }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Description
+                    </label>
+                    <input 
+                      value={form.Description} 
+                      onChange={(e) => setForm(v => ({ ...v, Description: e.target.value }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Discount Amount</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Discount Amount <span className="text-red-500">*</span>
+                    </label>
                     <input
+                      required
                       type="number"
                       min={0}
-                      max={form.IsPercentage ? 100 : undefined as any}
                       value={form.DiscountAmount}
                       onChange={(e) => {
                         const n = Number(e.target.value);
@@ -497,28 +585,128 @@ export default function CouponsPage() {
                     {form.IsPercentage && <div className="mt-1 text-xs text-gray-500">0–100%</div>}
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Minimum Order Value</label>
-                    <input type="number" min={0} value={form.MinimumOrderValue} onChange={(e) => setForm(v => ({ ...v, MinimumOrderValue: Math.max(0, Number(e.target.value)) as any }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Minimum Order Value <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="number" 
+                      min={0} 
+                      required
+                      value={form.MinimumOrderValue} 
+                      onChange={(e) => setForm(v => ({ ...v, MinimumOrderValue: Math.max(0, Number(e.target.value)) as any }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Max Discount Amount</label>
-                    <input type="number" min={0} value={form.MaxDiscountAmount} onChange={(e) => setForm(v => ({ ...v, MaxDiscountAmount: Math.max(0, Number(e.target.value)) as any }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Max Discount Amount <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="number" 
+                      min={0} 
+                      required
+                      value={form.MaxDiscountAmount} 
+                      onChange={(e) => setForm(v => ({ ...v, MaxDiscountAmount: Math.max(0, Number(e.target.value)) as any }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Max Usage Count</label>
-                    <input type="number" min={0} value={form.MaxUsageCount} onChange={(e) => setForm(v => ({ ...v, MaxUsageCount: Math.max(0, Number(e.target.value)) as any }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Max Usage Count <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="number" 
+                      min={0} 
+                      required
+                      value={form.MaxUsageCount} 
+                      onChange={(e) => setForm(v => ({ ...v, MaxUsageCount: Math.max(0, Number(e.target.value)) as any }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Max Usage Per User</label>
-                    <input type="number" min={0} value={form.MaxUsagePerUser} onChange={(e) => setForm(v => ({ ...v, MaxUsagePerUser: Math.max(0, Number(e.target.value)) as any }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Max Usage Per User <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="number" 
+                      min={0} 
+                      required
+                      value={form.MaxUsagePerUser} 
+                      onChange={(e) => setForm(v => ({ ...v, MaxUsagePerUser: Math.max(0, Number(e.target.value)) as any }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
+                  </div>
+                  <div className="col-span-2">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Applicable Products <span className="text-red-500">*</span>
+                    </label>
+                    <Select
+                      mode="multiple"
+                      placeholder={loadingProducts ? 'Loading products...' : 'Select products...'}
+                      value={form.ApplicableProductIds}
+                      onChange={(selectedIds: number[]) => {
+                        setForm(v => ({ ...v, ApplicableProductIds: selectedIds }));
+                      }}
+                      options={products.map(product => ({
+                        value: product.ProductID,
+                        label: `${product.ProductName} (ID: ${product.ProductID})`,
+                      }))}
+                      loading={loadingProducts}
+                      optionFilterProp="label"
+                      showSearch
+                      allowClear
+                      className="w-full [&_.ant-select-selector]:min-h-[42px] [&_.ant-select-selection-overflow]:gap-2 [&_.ant-select-selection-item]:bg-blue-50 [&_.ant-select-selection-item]:border-blue-100 [&_.ant-select-selection-item]:text-blue-700 [&_.ant-select-selection-item]:rounded-full"
+                      dropdownStyle={{
+                        borderRadius: '12px',
+                        boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+                        padding: '8px 0',
+                      }}
+                      dropdownRender={(menu) => (
+                        <div>
+                          <div className="px-3 py-1 text-xs text-gray-500 border-b border-gray-100">Available Products</div>
+                          <div className="p-1">
+                            {menu}
+                          </div>
+                        </div>
+                      )}
+                      tagRender={(props) => {
+                        const { label, closable, onClose } = props;
+                        const onPreventMouseDown = (event: React.MouseEvent<HTMLSpanElement>) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        };
+                        return (
+                          <Tag
+                            color="blue"
+                            onMouseDown={onPreventMouseDown}
+                            closable={closable}
+                            onClose={onClose}
+                            className="inline-flex items-center text-xs py-0.5 px-2.5 m-0"
+                            style={{ marginRight: 0 }}
+                          >
+                            {label}
+                          </Tag>
+                        );
+                      }}
+                      popupClassName="[&_.ant-select-item-option-selected]:bg-blue-50 [&_.ant-select-item-option-active]:bg-gray-50"
+                    />
+                    <div className="mt-1 text-xs text-gray-500">
+                      {form.ApplicableProductIds.length > 0 
+                        ? `${form.ApplicableProductIds.length} product(s) selected` 
+                        : 'Search and select products'}
+                    </div>
                   </div>
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Applicable Product IDs (comma separated)</label>
-                    <input value={form.ApplicableProductIds} onChange={(e) => setForm(v => ({ ...v, ApplicableProductIds: e.target.value }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Start Date</label>
-                    <input type="date" value={form.StartDate} onChange={(e) => setForm(v => ({ ...v, StartDate: e.target.value }))} className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Start Date <span className="text-red-500">*</span>
+                    </label>
+                    <input 
+                      type="date" 
+                      required
+                      value={form.StartDate} 
+                      onChange={(e) => setForm(v => ({ ...v, StartDate: e.target.value }))} 
+                      className="w-full rounded-xl border border-gray-200 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" 
+                    />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">End Date</label>
